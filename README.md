@@ -7,7 +7,21 @@
 - 마운트되지 않은 `~/Downloads/*.dmg`, 휴지통
 - 비활성 메모리 정리(`purge`, 관리자 암호 필요)
 
-## 실행
+## 설치 (Apple Silicon Mac)
+
+1. [Releases](https://github.com/loscive/mac-cleaner-web/releases/latest)에서 `MacCleaner-*-arm64.dmg`를 내려받습니다.
+2. DMG를 열고 `Mac Cleaner.app`을 `Applications` 폴더로 끌어 놓습니다.
+3. 처음 실행할 때 "확인되지 않은 개발자" 경고가 나오면:
+   **시스템 설정 → 개인정보 보호 및 보안** 맨 아래의 **그래도 열기**를 누릅니다.
+   또는 터미널에서 다음을 실행합니다.
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Mac Cleaner.app"
+   ```
+
+> Apple 개발자 인증서로 서명·공증하지 않은 앱이라 이 경고가 나옵니다. Intel Mac은 지원하지 않습니다.
+
+## 소스에서 실행
 
 ```bash
 python3 mac_cleaner.py
