@@ -281,20 +281,19 @@ def get_disk_info() -> dict:
 # ─── 삭제 ────────────────────────────────────────────────────
 def _make_writable(p: Path) -> None:
     import stat as _stat
+    def _add_write(fp: str) -> None:
+        # lstat + follow_symlinks=False: 검사 직후 링크로 바꿔치기돼도 원본 권한은 바뀌지 않음
+        try:
+            st = os.lstat(fp)
+            if not _stat.S_ISLNK(st.st_mode):
+                os.chmod(fp, st.st_mode | _stat.S_IWUSR, follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            pass
+
     for root, dirs, files in os.walk(str(p), topdown=False):
         for name in files + dirs:
-            fp = Path(root) / name
-            # 링크를 따라가면 정리 폴더 밖 원본의 권한이 바뀌므로 건너뜀
-            if fp.is_symlink():
-                continue
-            try:
-                fp.chmod(fp.stat().st_mode | _stat.S_IWUSR)
-            except OSError:
-                pass
-    try:
-        p.chmod(p.stat().st_mode | _stat.S_IWUSR)
-    except OSError:
-        pass
+            _add_write(os.path.join(root, name))
+    _add_write(str(p))
 
 def do_clean(t: dict) -> dict:
     try:
@@ -446,16 +445,38 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 MUTATING_PATHS = {"/api/clean", "/api/purge", "/api/quit",
                   "/api/trash/open_finder", "/api/trash/open_fda"}
 
+def app_url() -> str:
+    # 토큰은 앱이 직접 여는 URL로만 전달 (같은 Mac의 다른 계정이 GET / 로 얻지 못하게)
+    return f"http://127.0.0.1:{PORT}/?t={TOKEN}"
+
+SECURITY_HEADERS = {
+    # 다른 사이트가 iframe으로 끼워 넣어 클릭을 유도하는 클릭재킹 차단
+    "X-Frame-Options":         "DENY",
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "X-Content-Type-Options":  "nosniff",
+    "Cache-Control":           "no-store",
+    "Referrer-Policy":         "no-referrer",
+}
+
+FORBIDDEN_PAGE = ("<!DOCTYPE html><meta charset='utf-8'><title>Mac Cleaner</title>"
+                  "<p style='font-family:-apple-system,sans-serif;padding:40px'>"
+                  "이 주소로는 열 수 없습니다. Mac Cleaner 앱 아이콘을 다시 눌러 주세요.</p>")
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
-    def send_json(self, data, status=200):
-        body = json.dumps(data, ensure_ascii=False).encode()
+    def _send(self, status, body: bytes, ctype: str):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def send_json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False).encode()
+        self._send(status, body, "application/json; charset=utf-8")
 
     def do_GET(self):
         self._handle("GET")
@@ -484,17 +505,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "forbidden"}, status=403)
             return
 
-        # 상태를 바꾸는 API는 POST + 토큰 헤더만 허용 (다른 사이트의 요청 차단)
-        if path in MUTATING_PATHS:
-            if method != "POST" or not secrets.compare_digest(
-                    self.headers.get("X-Token", ""), TOKEN):
-                self.send_json({"error": "forbidden"}, status=403)
-                return
-        elif method != "GET":
-            self.send_json({"error": "method not allowed"}, status=405)
-            return
-
         if path in ("/", "/index.html"):
+            if method != "GET":
+                self.send_json({"error": "method not allowed"}, status=405)
+                return
+            tok = parse_qs(parsed.query).get("t", [""])[0]
+            if not secrets.compare_digest(tok, TOKEN):
+                self._send(403, FORBIDDEN_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                return
             # excludes 키는 프론트엔드에 불필요하므로 제외
             skip = {"paths", "excludes"}
             tj   = json.dumps(
@@ -502,11 +520,15 @@ class Handler(BaseHTTPRequestHandler):
                 ensure_ascii=False)
             body = (HTML.replace("__TARGETS__", tj)
                         .replace("__TOKEN__", TOKEN)).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(200, body, "text/html; charset=utf-8")
+            return
+
+        # 모든 API는 토큰 헤더 필요, 상태를 바꾸는 API는 POST만 허용
+        if not secrets.compare_digest(self.headers.get("X-Token", ""), TOKEN):
+            self.send_json({"error": "forbidden"}, status=403)
+            return
+        if method != ("POST" if path in MUTATING_PATHS else "GET"):
+            self.send_json({"error": "method not allowed"}, status=405)
             return
 
         if path == "/api/scan":
@@ -561,8 +583,7 @@ class Handler(BaseHTTPRequestHandler):
                 daemon=True).start()
             return
 
-        self.send_response(404)
-        self.end_headers()
+        self.send_json({"error": "not found"}, status=404)
 
 
 # ─── 서버·단일 인스턴스 제어 ──────────────────────────────────
@@ -592,10 +613,14 @@ def _ctrl_server():
         while True:
             try:
                 conn, _ = srv.accept()
-                msg = conn.recv(32).decode("utf-8", "ignore").strip()
-                conn.close()
+                # 연결만 하고 보내지 않는 클라이언트가 제어 서버를 멈추지 못하게
+                conn.settimeout(1)
+                try:
+                    msg = conn.recv(32).decode("utf-8", "ignore").strip()
+                finally:
+                    conn.close()
                 if msg == "reopen":
-                    webbrowser.open(f"http://127.0.0.1:{PORT}")
+                    webbrowser.open(app_url())
             except Exception:
                 pass
     except Exception:
@@ -1011,6 +1036,11 @@ let cleanLog = {};
 let currentPage = 'dashboard';
 let _scanLock = false;
 
+// 모든 API 호출에 토큰 헤더를 붙임
+function get(path) {
+  return fetch(path, {headers: {'X-Token': TOKEN}});
+}
+
 // 상태를 바꾸는 API는 POST + 토큰으로만 호출 (실패 시 {error} 반환)
 function post(path) {
   return fetch(path, {method: 'POST', headers: {'X-Token': TOKEN}})
@@ -1113,14 +1143,14 @@ function updateLastCleaned(key) {
 
 async function loadCleanLog() {
   try {
-    cleanLog = await fetch('/api/cleanlog').then(r => r.json());
+    cleanLog = await get('/api/cleanlog').then(r => r.json());
   } catch(e) { cleanLog = {}; }
 }
 
 // ── 디스크 정보 ──────────────────────────────────────────────
 async function loadDiskInfo() {
   try {
-    const d = await fetch('/api/diskinfo').then(r => r.json());
+    const d = await get('/api/diskinfo').then(r => r.json());
     if (!d.total) return;
     document.getElementById('diskbar').style.display = 'flex';
     document.getElementById('diskUsed').textContent  = fmtSize(d.used) + ' 사용';
@@ -1142,7 +1172,7 @@ async function startScan() {
   TARGETS.forEach(t => setSize(t.key, null));
 
   try {
-    const r = await fetch('/api/scan');
+    const r = await get('/api/scan');
     if (!r.ok) throw new Error('scan failed');
     const data = await r.json();
     sizes = {};
@@ -1170,7 +1200,7 @@ async function startScan() {
 async function rescanOne(key) {
   setSize(key, null);
   try {
-    const r = await fetch('/api/scan_one?key=' + key);
+    const r = await get('/api/scan_one?key=' + key);
     const data = await r.json();
     const sz = data[key] ?? 0;
     sizes[key] = sz < 0 ? 0 : sz;
@@ -1330,7 +1360,7 @@ async function quitApp() {
 // ── 메모리 ───────────────────────────────────────────────────
 async function loadMemory() {
   try {
-    const d = await fetch('/api/memory').then(r => r.json());
+    const d = await get('/api/memory').then(r => r.json());
     renderMemory(d);
   } catch(e) {
     document.getElementById('memLoading').textContent = '메모리 정보를 불러올 수 없습니다.';
@@ -1391,7 +1421,7 @@ Promise.all([loadCleanLog(), loadDiskInfo()]).then(() => startScan());
 
 // ── heartbeat ────────────────────────────────────────────────
 // 탭이 닫히면 ping이 끊겨 서버 watchdog이 종료함 (새로고침에는 종료되지 않음)
-const ping = () => fetch('/api/ping').catch(() => {});
+const ping = () => get('/api/ping').catch(() => {});
 setInterval(ping, 3000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) ping(); });
 </script>
@@ -1422,7 +1452,7 @@ if __name__ == "__main__":
 
     threading.Thread(target=_watchdog, daemon=True).start()
 
-    url = f"http://127.0.0.1:{PORT}"
+    url = app_url()
     safe_print(f"Mac Cleaner 실행 중: {url}")
     safe_print("종료: Ctrl+C 또는 브라우저 ✕ 버튼")
 

@@ -48,4 +48,5 @@ app = BUNDLE(
     name='Mac Cleaner.app',
     icon='MacCleaner.icns',
     bundle_identifier='com.antygravity.maccleaner',
+    version='1.0.1',
 )

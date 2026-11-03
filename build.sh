@@ -9,10 +9,12 @@ WORK="$(mktemp -d /tmp/maccleaner-build.XXXXXX)"
 DEST="$HOME/Applications"
 trap 'rm -rf "$WORK"' EXIT
 
-cp "$SRC/mac_cleaner.py" "$SRC/Mac Cleaner.spec" "$SRC/MacCleaner.icns" "$WORK/"
+cp "$SRC/mac_cleaner.py" "$SRC/Mac Cleaner.spec" "$SRC/MacCleaner.icns" \
+   "$SRC/build-requirements.txt" "$WORK/"
 cd "$WORK"
 /usr/bin/python3 -m venv venv
-./venv/bin/pip install -q pyinstaller
+# 버전·해시가 고정된 휠만 설치 (패키지 저장소가 변조돼도 다른 코드가 섞이지 않게)
+./venv/bin/pip install -q --require-hashes --only-binary=:all: -r build-requirements.txt
 ./venv/bin/pyinstaller --noconfirm --clean "Mac Cleaner.spec"
 
 mkdir -p "$DEST"

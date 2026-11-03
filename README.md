@@ -39,6 +39,16 @@ python3 mac_cleaner.py
 
 ## 보안
 
-서버는 `127.0.0.1`에만 열립니다. 삭제 등 상태를 바꾸는 API는 POST와 실행할 때마다 새로 만드는 토큰이 있어야 하므로, 다른 웹사이트가 호출할 수 없습니다.
+- 서버는 `127.0.0.1`에만 열리고, Host 헤더를 검사해 DNS 리바인딩을 막습니다.
+- 실행할 때마다 새 토큰을 만들어 앱이 여는 주소로만 전달합니다. 토큰 없이는 페이지도 API도 열리지 않습니다.
+- 삭제 등 상태를 바꾸는 API는 POST + 토큰 헤더로만 호출됩니다.
+- `X-Frame-Options: DENY`와 CSP `frame-ancestors 'none'`으로 다른 사이트가 화면을 끼워 넣는 클릭재킹을 막습니다.
+- 빌드 도구(PyInstaller와 의존성)는 [build-requirements.txt](build-requirements.txt)에 버전과 SHA-256으로 고정되어 있습니다.
+
+내려받은 DMG는 릴리스 노트의 SHA-256과 비교해 확인할 수 있습니다.
+
+```bash
+shasum -a 256 MacCleaner-*-arm64.dmg
+```
 
 > 삭제는 영구적이며 되돌릴 수 없습니다. 삭제 전 확인 창의 목록을 꼭 확인하세요.
