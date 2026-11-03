@@ -1,0 +1,6 @@
+build/
+dist/
+*.app
+__pycache__/
+.DS_Store
+.claude/
